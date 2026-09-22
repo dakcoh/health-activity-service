@@ -18,10 +18,12 @@ public class ActivityQueryService {
     private static final ZoneId SEOUL = ZoneId.of("Asia/Seoul");
     private final ActivityRepository activities;
     private final MemberRepository members;
+    private final ActivitySummaryCache cache;
 
-    public ActivityQueryService(ActivityRepository activities, MemberRepository members) {
+    public ActivityQueryService(ActivityRepository activities, MemberRepository members, ActivitySummaryCache cache) {
         this.activities = activities;
         this.members = members;
+        this.cache = cache;
     }
 
     public List<ActivitySummary> daily(String email, String recordKey, String from, String to) {
@@ -62,6 +64,8 @@ public class ActivityQueryService {
         if (!member.getRecordKey().equals(recordKey)) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "본인의 recordkey만 조회할 수 있습니다.");
         }
+        var cached = cache.get(recordKey, from, toExclusive, monthly);
+        if (cached != null) return cached;
         var fromUtc = from.atStartOfDay(SEOUL).withZoneSameInstant(ZoneOffset.UTC).toLocalDateTime();
         var toUtc = toExclusive.atStartOfDay(SEOUL).withZoneSameInstant(ZoneOffset.UTC).toLocalDateTime();
         var buckets = new TreeMap<String, Totals>();
@@ -72,9 +76,11 @@ public class ActivityQueryService {
             String period = monthly ? YearMonth.from(date).toString() : date.toString();
             buckets.merge(period, new Totals(value.getSteps(), value.getCalories(), value.getDistance()), Totals::add);
         }
-        return buckets.entrySet().stream().map(entry -> new ActivitySummary(entry.getKey(),
+        var rows = buckets.entrySet().stream().map(entry -> new ActivitySummary(entry.getKey(),
                 entry.getValue().steps().setScale(0, RoundingMode.HALF_UP).toBigIntegerExact(),
                 entry.getValue().calories(), entry.getValue().distance(), recordKey)).toList();
+        cache.put(recordKey, from, toExclusive, monthly, rows);
+        return rows;
     }
 
     private static void validateRange(LocalDate from, LocalDate to) {

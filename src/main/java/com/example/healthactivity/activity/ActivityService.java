@@ -11,6 +11,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.server.ResponseStatusException;
 
 @Service
@@ -21,10 +23,12 @@ public class ActivityService {
     private static final ZoneId SEOUL = ZoneId.of("Asia/Seoul");
     private final ActivityRepository activities;
     private final MemberRepository members;
+    private final ActivitySummaryCache cache;
 
-    public ActivityService(ActivityRepository activities, MemberRepository members) {
+    public ActivityService(ActivityRepository activities, MemberRepository members, ActivitySummaryCache cache) {
         this.activities = activities;
         this.members = members;
+        this.cache = cache;
     }
 
     @Transactional(isolation = Isolation.READ_COMMITTED)
@@ -64,6 +68,14 @@ public class ActivityService {
         }
         // 검증과 충돌 확인을 끝낸 후 저장하여 요청 전체를 원자적으로 처리한다.
         activities.saveAllAndFlush(added);
+        if (!added.isEmpty()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    cache.evict(request.recordkey());
+                }
+            });
+        }
         return new Receipt(request.recordkey(), incoming.size(), added.size(), incoming.size() - added.size());
     }
 

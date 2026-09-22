@@ -9,7 +9,11 @@ import com.example.healthactivity.member.MemberRepository;
 import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.Collection;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -23,12 +27,18 @@ import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.data.redis.RedisConnectionFailureException;
+import org.springframework.data.redis.core.HashOperations;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import tools.jackson.databind.json.JsonMapper;
 
 import static org.assertj.core.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -42,6 +52,10 @@ class ActivityIntegrationTest {
     @Autowired MemberRepository members;
     @Autowired ActivityRepository activities;
     @Autowired JdbcTemplate jdbc;
+    @MockitoBean StringRedisTemplate redis;
+    @SuppressWarnings("unchecked")
+    private final HashOperations<String, String, String> hashes = mock(HashOperations.class);
+    private final Map<String, Map<String, String>> cached = new ConcurrentHashMap<>();
     private final JsonMapper json = new JsonMapper();
     private Member member;
 
@@ -53,6 +67,22 @@ class ActivityIntegrationTest {
 
     @BeforeEach
     void setUp() {
+        reset(hashes);
+        cached.clear();
+        when(redis.<String, String>opsForHash()).thenReturn(hashes);
+        when(hashes.get(anyString(), anyString())).thenAnswer(call ->
+                cached.getOrDefault(call.getArgument(0), Map.of()).get(call.getArgument(1)));
+        doAnswer(call -> {
+            cached.computeIfAbsent(call.getArgument(0), ignored -> new ConcurrentHashMap<>())
+                    .put(call.getArgument(1), call.getArgument(2));
+            return null;
+        }).when(hashes).put(anyString(), anyString(), anyString());
+        when(redis.expire(anyString(), any(Duration.class))).thenReturn(true);
+        when(redis.delete(any(Collection.class))).thenAnswer(call -> {
+            Collection<String> keys = call.getArgument(0);
+            keys.forEach(cached::remove);
+            return (long) keys.size();
+        });
         clean();
         member = members.saveAndFlush(new Member("홍길동", "walker", "walker@example.com", "unused"));
     }
@@ -335,5 +365,47 @@ class ActivityIntegrationTest {
         assertThat(summaries("monthly", member.getRecordKey(), "2024-01", "2025-12")).isEmpty();
         mvc.perform(get("/api/activities/daily").with(user(member.getEmail())).param("recordKey", member.getRecordKey()))
                 .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void cachesBothQueriesAndEvictsOnlyAfterNewDataCommits() throws Exception {
+        send(body(ENTRY), 200);
+        var key = member.getRecordKey();
+        assertThat(summaries("daily", key, "2024-11-15", "2024-11-16")).hasSize(1);
+        assertThat(summaries("monthly", key, "2024-11", "2024-11")).hasSize(1);
+        assertThat(cached).hasSize(2);
+        summaries("daily", key, "2024-11-15", "2024-11-16");
+        summaries("monthly", key, "2024-11", "2024-11");
+        verify(hashes, times(2)).put(anyString(), anyString(), anyString());
+
+        send(body(ENTRY), 200); // 동일 데이터는 캐시를 제거하지 않는다.
+        send(body(ENTRY.replace("\"steps\":54", "\"steps\":55")), 409);
+        assertThat(cached).hasSize(2);
+        verify(redis, times(1)).delete(any(Collection.class));
+
+        send(body(ENTRY.replace("2024-11-15", "2024-11-16")), 200);
+        assertThat(cached).isEmpty();
+        assertThat(summaries("daily", key, "2024-11-15", "2024-11-16")).hasSize(2);
+        assertThat(summaries("monthly", key, "2024-11", "2024-11")).hasSize(1);
+        verify(redis, times(2)).delete(any(Collection.class));
+        verify(hashes, times(4)).put(anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void cacheFailureFallsBackToDatabaseAndDoesNotFailWrites() throws Exception {
+        when(redis.<String, String>opsForHash()).thenThrow(new RedisConnectionFailureException("offline"));
+        when(redis.delete(any(Collection.class))).thenThrow(new RedisConnectionFailureException("offline"));
+        send(body(ENTRY), 200);
+        assertThat(summaries("daily", member.getRecordKey(), "2024-11-15", "2024-11-15")).hasSize(1);
+        assertThat(summaries("monthly", member.getRecordKey(), "2024-11", "2024-11")).hasSize(1);
+    }
+
+    @Test
+    void ownershipIsCheckedBeforeCacheLookup() throws Exception {
+        var other = members.saveAndFlush(new Member("다른 회원", "other", "other@example.com", "unused"));
+        mvc.perform(get("/api/activities/daily").with(user(member.getEmail()))
+                .param("recordKey", other.getRecordKey()).param("from", "2024-11-15").param("to", "2024-11-15"))
+                .andExpect(status().isForbidden());
+        verify(hashes, never()).get(anyString(), anyString());
     }
 }
