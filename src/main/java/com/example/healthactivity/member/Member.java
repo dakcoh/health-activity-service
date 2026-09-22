@@ -2,6 +2,7 @@ package com.example.healthactivity.member;
 
 import jakarta.persistence.*;
 import java.time.Instant;
+import java.util.UUID;
 
 @Entity
 @Table(name = "members")
@@ -15,6 +16,8 @@ public class Member {
     private String nickname;
     @Column(nullable = false, unique = true, length = 254)
     private String email;
+    @Column(name = "record_key", nullable = false, unique = true, length = 100)
+    private String recordKey;
     @Column(name = "password_hash", nullable = false, length = 100)
     private String passwordHash;
     @Column(name = "created_at", nullable = false)
@@ -28,6 +31,7 @@ public class Member {
         this.name = name;
         this.nickname = nickname;
         this.email = email;
+        this.recordKey = UUID.randomUUID().toString();
         this.passwordHash = passwordHash;
         this.createdAt = Instant.now();
         this.updatedAt = createdAt;
@@ -37,5 +41,6 @@ public class Member {
     public String getName() { return name; }
     public String getNickname() { return nickname; }
     public String getEmail() { return email; }
+    public String getRecordKey() { return recordKey; }
     public String getPasswordHash() { return passwordHash; }
 }

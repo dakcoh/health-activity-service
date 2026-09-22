@@ -39,4 +39,6 @@ dependencies {
 
 tasks.named('test') {
 	useJUnitPlatform()
+	// UTC가 아닌 JVM에서도 UTC 저장 결과가 같아야 한다.
+	systemProperty 'user.timezone', 'Asia/Seoul'
 }

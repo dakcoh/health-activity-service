@@ -40,6 +40,7 @@ class MemberAuthIntegrationTest {
     void registrationNormalizesEmailAndHashesPassword() throws Exception {
         register();
         var member = members.findByEmail("walker@example.com").orElseThrow();
+        assertThat(java.util.UUID.fromString(member.getRecordKey())).isNotNull();
         assertThat(member.getPasswordHash()).isNotEqualTo("password123!");
         assertThat(encoder.matches("password123!", member.getPasswordHash())).isTrue();
         mvc.perform(post("/api/members").with(csrf()).contentType(MediaType.APPLICATION_JSON)
@@ -101,6 +102,7 @@ class MemberAuthIntegrationTest {
         mvc.perform(post("/api/members").with(csrf()).contentType(MediaType.APPLICATION_JSON).content(REGISTRATION))
                 .andExpect(status().isCreated()).andExpect(jsonPath("id").isNumber())
                 .andExpect(jsonPath("email").value("walker@example.com"))
+                .andExpect(jsonPath("recordkey").isNotEmpty())
                 .andExpect(jsonPath("password").doesNotExist()).andExpect(jsonPath("passwordHash").doesNotExist());
     }
 }
